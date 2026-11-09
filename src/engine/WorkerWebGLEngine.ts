@@ -1,16 +1,42 @@
+import sharedWorkerUrl from './webgl.worker?sharedworker&url';
 import type { FractalParams } from '../types/fractal';
 
 export type WebGLWorkerRequest =
   | { type: 'init'; canvas: OffscreenCanvas; testMode: boolean }
+  | { type: 'attach'; width: number; height: number; testMode: boolean }
+  | { type: 'release'; keepWarm: boolean }
   | { type: 'frame'; time: number; params: FractalParams; width: number; height: number; capture: boolean }
   | { type: 'quality'; level: number }
   | { type: 'prefetch'; index: number };
 
 export type WebGLWorkerResponse =
-  | { type: 'ready'; rendererInfo: string }
+  | { type: 'ready'; rendererInfo: string; resumed: boolean }
   | { type: 'progress'; stage: string; percent: number }
   | { type: 'fatal'; message: string }
-  | { type: 'frame'; drawn: boolean; swapping: boolean; progress: number; canPrefetch: boolean; quality: number; screenshot?: Blob; error?: string };
+  | { type: 'frame'; drawn: boolean; swapping: boolean; progress: number; canPrefetch: boolean; quality: number; bitmap?: ImageBitmap; screenshot?: Blob; error?: string };
+
+function openResumableWorker(): SharedWorker | undefined {
+  if (typeof SharedWorker === 'undefined' || typeof ImageBitmapRenderingContext === 'undefined') return;
+  try {
+    const key = 'swype.webgl.session';
+    const name = sessionStorage.getItem(key) || crypto.randomUUID();
+    sessionStorage.setItem(key, name);
+    let supportsLifetime = false;
+    const options = {
+      name,
+      type: 'module' as const,
+      get extendedLifetime() {
+        supportsLifetime = true;
+        return true;
+      },
+    };
+    const worker = new SharedWorker(sharedWorkerUrl, options);
+    if (supportsLifetime) return worker;
+    worker.port.close();
+  } catch {
+    // Storage or shared workers may be unavailable in an embedded document.
+  }
+}
 
 /**
  * One request at a time, with camera and layout sampled again on the next frame.
@@ -25,7 +51,13 @@ export class WorkerWebGLEngine {
   frameIntervalMs = 0;
   onCompileProgress?: (stage: string, percent: number) => void;
 
-  private worker: Worker;
+  private readonly worker: Worker | SharedWorker;
+  private readonly channel: Worker | MessagePort;
+  private readonly shared: boolean;
+  private presentation?: ImageBitmapRenderingContext;
+  private onPageHide = (event: PageTransitionEvent) => {
+    if (!event.persisted) this.close(true);
+  };
   private ready = false;
   private closed = false;
   private waitingForFrame = false;
@@ -44,19 +76,32 @@ export class WorkerWebGLEngine {
     this.canvas = canvas;
     this.width = canvas.width;
     this.height = canvas.height;
-    this.worker = new Worker(new URL('./webgl.worker.ts', import.meta.url), { type: 'module' });
-    this.worker.onmessage = (event: MessageEvent<WebGLWorkerResponse>) => this.receive(event.data);
+    const shared = openResumableWorker();
+    const worker = shared ?? new Worker(new URL('./webgl.worker.ts', import.meta.url), { type: 'module' });
+    this.worker = worker;
+    this.shared = !!shared;
+    this.channel = shared?.port ?? (worker as Worker);
+    this.channel.onmessage = (event: MessageEvent<WebGLWorkerResponse>) => this.receive(event.data);
     this.worker.onerror = event => this.fail(event.message || 'WebGL worker failed to load');
-    this.worker.onmessageerror = () => this.fail('WebGL worker message could not be decoded');
+    this.channel.onmessageerror = () => this.fail('WebGL worker message could not be decoded');
   }
 
   init(): Promise<boolean> {
     return new Promise(resolve => {
       this.finishInit = resolve;
       try {
-        const canvas = this.canvas.transferControlToOffscreen();
+        const testMode = window.location.search.includes('test=1');
         this.initTimer = setTimeout(() => this.fail('WebGL worker initialization timed out'), 15000);
-        this.send({ type: 'init', canvas, testMode: window.location.search.includes('test=1') }, [canvas]);
+        if (this.shared) {
+          const presentation = this.canvas.getContext('bitmaprenderer');
+          if (!presentation) throw new Error('Image bitmap presentation is unavailable');
+          this.presentation = presentation;
+          window.addEventListener('pagehide', this.onPageHide);
+          this.send({ type: 'attach', width: this.width, height: this.height, testMode });
+        } else {
+          const canvas = this.canvas.transferControlToOffscreen();
+          this.send({ type: 'init', canvas, testMode }, [canvas]);
+        }
       } catch (error) {
         this.fail(error instanceof Error ? error.message : String(error));
       }
@@ -64,11 +109,14 @@ export class WorkerWebGLEngine {
   }
 
   private send(message: WebGLWorkerRequest, transfer: Transferable[] = []) {
-    if (!this.closed) this.worker.postMessage(message, transfer);
+    if (!this.closed) this.channel.postMessage(message, transfer);
   }
 
   private receive(message: WebGLWorkerResponse) {
-    if (this.closed) return;
+    if (this.closed) {
+      if (message.type === 'frame') message.bitmap?.close();
+      return;
+    }
     switch (message.type) {
       case 'ready':
         this.rendererInfo = message.rendererInfo;
@@ -85,6 +133,12 @@ export class WorkerWebGLEngine {
         break;
       case 'frame':
         this.waitingForFrame = false;
+        if (message.bitmap && this.presentation) {
+          const { width, height } = message.bitmap;
+          if (this.canvas.width !== width) this.canvas.width = width;
+          if (this.canvas.height !== height) this.canvas.height = height;
+          this.presentation.transferFromImageBitmap(message.bitmap);
+        }
         this.drawn = message.drawn;
         this.swapping = message.swapping;
         this.swapProgress = message.progress;
@@ -154,12 +208,21 @@ export class WorkerWebGLEngine {
   }
 
   destroy() {
+    this.close(false);
+  }
+
+  private close(keepWarm: boolean) {
     if (this.closed) return;
     this.closed = true;
     this.ready = false;
     clearTimeout(this.initTimer);
     this.finishInit?.(false);
     this.finishInit = undefined;
-    this.worker.terminate();
+    if (this.shared) {
+      window.removeEventListener('pagehide', this.onPageHide);
+      this.channel.postMessage({ type: 'release', keepWarm } satisfies WebGLWorkerRequest);
+    } else {
+      (this.worker as Worker).terminate();
+    }
   }
 }
