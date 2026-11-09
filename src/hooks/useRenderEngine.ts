@@ -352,7 +352,8 @@ export function useRenderEngine(
         glEngine.destroy();
         return;
       }
-      if (!success && useWorker) {
+      if (!success && glEngine instanceof WorkerWebGLEngine) {
+        if (glEngine.leavingDocument) return;
         fallBackFromWorker('WebGL worker could not initialize');
         return;
       }

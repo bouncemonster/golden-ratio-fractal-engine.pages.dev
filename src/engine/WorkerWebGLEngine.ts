@@ -51,12 +51,41 @@ export class WorkerWebGLEngine {
   frameIntervalMs = 0;
   onCompileProgress?: (stage: string, percent: number) => void;
 
-  private readonly worker: Worker | SharedWorker;
-  private readonly channel: Worker | MessagePort;
+  private worker: Worker | SharedWorker;
+  private channel: Worker | MessagePort;
   private readonly shared: boolean;
   private presentation?: ImageBitmapRenderingContext;
+  private leaving = false;
+  get leavingDocument() { return this.leaving; }
+  private detachPortListeners?: () => void;
   private onPageHide = (event: PageTransitionEvent) => {
-    if (!event.persisted) this.close(true);
+    if (!event.persisted) {
+      this.leaving = true;
+      this.close(true);
+      return;
+    }
+    // Chrome evicts a cached document if its shared worker posts to it.
+    // Keep the last presented frame and the React state in the cached page.
+    this.ready = false;
+    this.waitingForFrame = false;
+    this.drawn = false;
+    this.lastDrawAt = 0;
+    this.frameIntervalMs = 0;
+    clearTimeout(this.initTimer);
+    this.releasePort(true);
+  };
+  private onPageShow = (event: PageTransitionEvent) => {
+    if (!event.persisted || this.closed) return;
+    const worker = openResumableWorker();
+    if (!worker) {
+      this.fail('Could not reconnect to the WebGL worker');
+      return;
+    }
+    this.worker = worker;
+    this.channel = worker.port;
+    this.listen();
+    this.initTimer = setTimeout(() => this.fail('WebGL worker reconnection timed out'), 15000);
+    this.attach();
   };
   private ready = false;
   private closed = false;
@@ -81,9 +110,38 @@ export class WorkerWebGLEngine {
     this.worker = worker;
     this.shared = !!shared;
     this.channel = shared?.port ?? (worker as Worker);
-    this.channel.onmessage = (event: MessageEvent<WebGLWorkerResponse>) => this.receive(event.data);
-    this.worker.onerror = event => this.fail(event.message || 'WebGL worker failed to load');
-    this.channel.onmessageerror = () => this.fail('WebGL worker message could not be decoded');
+    this.listen();
+  }
+
+  private listen() {
+    const channel = this.channel;
+    const worker = this.worker;
+    let listening = true;
+    const current = () => listening && !this.closed && this.channel === channel;
+    channel.onmessage = ({ data }: MessageEvent<WebGLWorkerResponse>) => {
+      if (current()) this.receive(data);
+      else if (data.type === 'frame') data.bitmap?.close();
+    };
+    worker.onerror = event => {
+      if (current()) this.fail(event.message || 'WebGL worker failed to load');
+    };
+    channel.onmessageerror = () => {
+      if (current()) this.fail('WebGL worker message could not be decoded');
+    };
+    if (this.shared) {
+      const port = channel as MessagePort;
+      const onClose = () => {
+        if (current()) this.fail('WebGL worker connection closed');
+      };
+      port.addEventListener('close', onClose, { once: true });
+      this.detachPortListeners = () => {
+        listening = false;
+        worker.onerror = null;
+        port.onmessage = null;
+        port.onmessageerror = null;
+        port.removeEventListener('close', onClose);
+      };
+    }
   }
 
   init(): Promise<boolean> {
@@ -97,7 +155,8 @@ export class WorkerWebGLEngine {
           if (!presentation) throw new Error('Image bitmap presentation is unavailable');
           this.presentation = presentation;
           window.addEventListener('pagehide', this.onPageHide);
-          this.send({ type: 'attach', width: this.width, height: this.height, testMode });
+          window.addEventListener('pageshow', this.onPageShow);
+          this.attach();
         } else {
           const canvas = this.canvas.transferControlToOffscreen();
           this.send({ type: 'init', canvas, testMode }, [canvas]);
@@ -106,6 +165,22 @@ export class WorkerWebGLEngine {
         this.fail(error instanceof Error ? error.message : String(error));
       }
     });
+  }
+
+  private attach() {
+    this.send({
+      type: 'attach', width: this.width, height: this.height,
+      testMode: window.location.search.includes('test=1'),
+    });
+    this.send({ type: 'quality', level: this.qualityLevel });
+  }
+
+  private releasePort(keepWarm: boolean) {
+    const port = this.channel as MessagePort;
+    this.detachPortListeners?.();
+    this.detachPortListeners = undefined;
+    port.postMessage({ type: 'release', keepWarm } satisfies WebGLWorkerRequest);
+    port.close();
   }
 
   private send(message: WebGLWorkerRequest, transfer: Transferable[] = []) {
@@ -220,7 +295,8 @@ export class WorkerWebGLEngine {
     this.finishInit = undefined;
     if (this.shared) {
       window.removeEventListener('pagehide', this.onPageHide);
-      this.channel.postMessage({ type: 'release', keepWarm } satisfies WebGLWorkerRequest);
+      window.removeEventListener('pageshow', this.onPageShow);
+      this.releasePort(keepWarm);
     } else {
       (this.worker as Worker).terminate();
     }
