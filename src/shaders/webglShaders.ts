@@ -3388,44 +3388,94 @@ vec3 calcNormal(vec3 p, float eps, float microScale, out vec3 microNormal) {
 }
 
 // SOFT SHADOWS: 16 steps for realistic penumbra (optimized from 32)
-float calcSoftShadow(vec3 p, vec3 lightDir) {
-  float shadow = 1.0;
-  float t = 0.01;
-  for (int i = 0; i < 16; i++) {
-    float d = sceneSDF(p + lightDir * t).x;
-    if (d < 0.0001) return 0.0;
-    shadow = min(shadow, 12.0 * d / t);
-    t += clamp(d, 0.01, 0.2);
-    if (t > 8.0) break;
+vec2 calcSoftShadows(vec3 p, vec3 firstLight, vec3 secondLight) {
+  vec2 shadows;
+  for (int light = 0; light < 2; light++) {
+    vec3 direction = light == 0 ? firstLight : secondLight;
+    float shadow = 1.0;
+    float t = 0.01;
+    for (int i = 0; i < 16; i++) {
+      float d = sceneSDF(p + direction * t).x;
+      if (d < 0.0001) { shadow = 0.0; break; }
+      shadow = min(shadow, 12.0 * d / t);
+      t += clamp(d, 0.01, 0.2);
+      if (t > 8.0) break;
+    }
+    shadows[light] = clamp(shadow, 0.0, 1.0);
   }
-  return clamp(shadow, 0.0, 1.0);
+  return shadows;
 }
 
-float calcAO(vec3 p, vec3 n, float t) {
-  float aoScale = clamp(t * 3.0, 0.3, 1.0); // Distance-adaptive
-  float occ = 0.0;
-  float sca = 1.0;
-  // HIGH-QUALITY AO: 7 samples (was 5) for smoother occlusion
-  for (int i = 0; i < 7; i++) {
-    float h = (0.01 + 0.11 * float(i * i) / 36.0) * aoScale;
-    float d = sceneSDF(p + h * n).x;
-    occ += (h - d) * sca;
-    sca *= 0.72; // Slightly faster decay for sharper details
-  }
+struct SurfaceSamples {
+  float ao;
+  vec3 environment;
+  float thickness;
+  vec2 gemstone;
+};
+
+float calcAO(vec4 distanceAO, float occ) {
   occ = clamp(occ, 0.0, 2.5);
-  
-  // IQ multi-distance AO: 4 distances (was 3) for better detail
-  // Same four distance/strength pairs, evaluated at one SDF call site.
-  const vec4 distances = vec4(0.003, 0.02, 0.08, 0.18);
-  const vec4 strengths = vec4(5.0, 3.0, 2.0, 1.2);
-  vec4 distanceAO;
-  for (int i = 0; i < 4; i++) {
-    float distance = distances[i];
-    float d = sceneSDF(p + n * distance * aoScale).x;
-    distanceAO[i] = clamp(1.0 - strengths[i] * max(distance * aoScale - d, 0.0), 0.0, 1.0);
-  }
   float multiAO = distanceAO.x * 0.20 + distanceAO.y * 0.35 + distanceAO.z * 0.30 + distanceAO.w * 0.15;
   return clamp(multiAO * (1.0 - 0.85 * occ), 0.12, 1.0);
+}
+
+SurfaceSamples sampleSurface(vec3 p, vec3 baseNormal, vec3 normal, vec3 rd, vec3 light, vec3 sssDir, float t) {
+  float aoScale = clamp(t * 3.0, 0.3, 1.0);
+  const vec4 distances = vec4(0.003, 0.02, 0.08, 0.18);
+  const vec4 strengths = vec4(5.0, 3.0, 2.0, 1.2);
+  float occ = 0.0;
+  float sca = 1.0;
+  vec4 distanceAO = vec4(1.0);
+  vec3 environment = vec3(0.0);
+  float thickness = 0.0;
+  vec2 gemstone = vec2(0.0);
+  vec3 reflected = reflect(rd, normal);
+  vec3 bounce = normalize(-light + normal * 0.5);
+  bool useGemstone = u_render_style > 5.5 && u_render_style < 6.5;
+  int tapCount = useGemstone ? 19 : 17;
+
+  // These probes share the same distance estimator. Keep their individual
+  // coordinates, order and weights while compiling only one call site.
+  for (int tap = 0; tap < tapCount; tap++) {
+    vec3 samplePos;
+    float height = 0.0;
+    if (tap < 7) {
+      height = (0.01 + 0.11 * float(tap * tap) / 36.0) * aoScale;
+      samplePos = p + height * baseNormal;
+    } else if (tap < 11) {
+      float distance = distances[tap - 7];
+      height = distance * aoScale;
+      samplePos = p + baseNormal * distance * aoScale;
+    } else if (tap == 11) {
+      samplePos = p + normal * 0.15;
+    } else if (tap == 12) {
+      samplePos = p + reflected * 0.3;
+    } else if (tap == 13) {
+      samplePos = p + bounce * 0.2;
+    } else if (tap < 17) {
+      float distance = float(tap - 13) * 0.05;
+      samplePos = (p - normal * 0.01) + sssDir * distance;
+    } else if (tap == 17) {
+      samplePos = p + reflected * 0.15;
+    } else {
+      samplePos = p + reflect(reflected, normal) * 0.1;
+    }
+    float d = sceneSDF(samplePos).x;
+    if (tap < 7) {
+      occ += (height - d) * sca;
+      sca *= 0.72;
+    } else if (tap < 11) {
+      int index = tap - 7;
+      distanceAO[index] = clamp(1.0 - strengths[index] * max(height - d, 0.0), 0.0, 1.0);
+    } else if (tap < 14) {
+      environment[tap - 11] = d;
+    } else if (tap < 17) {
+      thickness += max(0.0, -d);
+    } else {
+      gemstone[tap - 17] = d;
+    }
+  }
+  return SurfaceSamples(calcAO(distanceAO, occ), environment, thickness, gemstone);
 }
 
 vec3 acesToneMap(vec3 x) {
@@ -3670,10 +3720,12 @@ void main() {
     float tBest = tHigh;
     float bestD = 1e10;
 
-    for (int j = 0; j < 20; j++) {
-      float tMid = (tLow + tHigh) * 0.5;
+    float dHigh = 0.0;
+    for (int j = -1; j < 20; j++) {
+      float tMid = j < 0 ? tHigh : (tLow + tHigh) * 0.5;
       vec3 pMid = ro + rd * tMid;
       float dMid = sceneSDF(pMid).x;
+      if (j < 0) { dHigh = dMid; continue; }
       float absDMid = abs(dMid);
 
       // Track best (closest to surface) point
@@ -3692,10 +3744,10 @@ void main() {
       // Binary search: use SIGN to determine which half contains the surface
       // If dMid has same sign as d at tHigh, surface is in [tLow, tMid]
       // If dMid has opposite sign from d at tHigh, surface is in [tMid, tHigh]
-      float dHigh = sceneSDF(ro + rd * tHigh).x;
       if (dMid * dHigh > 0.0) {
         // Same sign — surface is in lower half
         tHigh = tMid;
+        dHigh = dMid;
       } else {
         // Opposite sign — surface is in upper half
         tLow = tMid;
@@ -3753,7 +3805,6 @@ void main() {
     float normalEps = min(0.0015 * max(t, 0.05) + 0.0004, 0.003);
     vec3 micro_n;
     vec3 base_n = calcNormal(p, normalEps, clamp(cam_dist * 0.5, 0.5, 2.0), micro_n);
-    float ao = calcAO(p, base_n, t);
     
     // TRAP-BASED CURVATURE: Derive surface complexity from orbit trap data
     // Replaces expensive 8-SDF-evaluation normal perturbation with trap-driven curvature
@@ -3773,12 +3824,17 @@ void main() {
     vec3 light1 = normalize(vec3(cos(u_time * 0.3), 1.2, sin(u_time * 0.3)));
     vec3 light2 = normalize(vec3(-sin(u_time * 0.25 * GOLDEN_RATIO), -0.6, cos(u_time * 0.25 * GOLDEN_RATIO)));
 
+    vec3 sssLightDir = normalize(vec3(0.5, 1.0, -0.3));
+    SurfaceSamples samples = sampleSurface(p, base_n, n, rd, light1, sssLightDir, t);
+    float ao = samples.ao;
+
     // ENHANCED PBR LIGHTING: Soft shadows + SSS + Environment reflections
     float fresnel = pow(clamp(1.0 + dot(rd, n), 0.0, 1.0), 3.0);
 
     // SOFT SHADOWS: 16-step penumbra for realistic lighting
-    float shadow1 = calcSoftShadow(p, light1);
-    float shadow2 = calcSoftShadow(p, light2);
+    vec2 shadows = calcSoftShadows(p, light1, light2);
+    float shadow1 = shadows.x;
+    float shadow2 = shadows.y;
 
     // Diffuse lighting WITH soft shadows
     float diff1 = max(dot(n, light1), 0.0) * shadow1;
@@ -3849,38 +3905,24 @@ void main() {
 
     // ENHANCED PBR Lighting: Environment reflections + SSS + soft shadows
     // Environment ambient: sample SDF along normal for color-bleeding approximation
-    vec3 reflectDir = reflect(rd, n);
-    vec3 bounceDir = normalize(-light1 + n * 0.5);
-    vec3 samplePos[3] = vec3[3](p + n * 0.15, p + reflectDir * 0.3, p + bounceDir * 0.2);
-    vec3 distances;
-    for (int i = 0; i < 3; i++) distances[i] = sceneSDF(samplePos[i]).x;
-    float envOcc = distances.x;
+    float envOcc = samples.environment.x;
     float envFactor = clamp(envOcc * 6.0, 0.0, 1.0);
     vec3 ambientCol = mix(u_secondary_color * 0.30, u_primary_color * 0.18, envFactor);
     vec3 ambient = ambientCol * ao;
     
     // ENVIRONMENT REFLECTIONS: 1 sample for subtle reflections
-    float envReflDist = distances.y;
+    float envReflDist = samples.environment.y;
     float envRefl = clamp(1.0 - envReflDist * 4.0, 0.0, 1.0);
     vec3 reflCol = mix(u_secondary_color, u_accent_color, envRefl) * envRefl * 0.25;
     reflCol *= (0.3 + 0.7 * fresnel);
     
     // BOUNCE LIGHT: Simplified indirect illumination
-    float bounceDist = distances.z;
+    float bounceDist = samples.environment.z;
     float bounceFactor = clamp(1.0 - bounceDist * 5.0, 0.0, 1.0);
     vec3 bounceCol = u_primary_color * bounceFactor * 0.15 * ao;
 
     // SUBSURFACE SCATTERING: 3 samples for light bleeding through thin parts
-    vec3 sssLightDir = normalize(vec3(0.5, 1.0, -0.3));
-    vec3 sssEnterPoint = p - n * 0.01;
-    float sssThickness = 0.0;
-    for (int sss_i = 1; sss_i <= 3; sss_i++) {
-      float sssDist = float(sss_i) * 0.05;
-      vec3 sssSamplePos = sssEnterPoint + sssLightDir * sssDist;
-      float sssD = sceneSDF(sssSamplePos).x;
-      sssThickness += max(0.0, -sssD);
-    }
-    float sss = exp(-sssThickness * 8.0);
+    float sss = exp(-samples.thickness * 8.0);
     vec3 sssColor = vec3(1.0, 0.4, 0.2) * sss * 0.4;
     float sssBackLight = max(dot(-n, sssLightDir), 0.0) * sss;
 
@@ -4129,12 +4171,10 @@ void main() {
       vec3 refractCol = mix(u_primary_color, prism, 0.6) * (0.7 + facetStrength * 0.6);
       vec3 gemCol = refractCol * beer;
       // Internal reflection: bounce light inside the gem
-      vec3 internalReflDir = reflect(rd, n);
-      float internalRefl = clamp(1.0 - sceneSDF(p + internalReflDir * 0.15).x * 6.0, 0.0, 1.0);
+      float internalRefl = clamp(1.0 - samples.gemstone.x * 6.0, 0.0, 1.0);
       gemCol += u_accent_color * internalRefl * beer * 0.2;
       // Second internal bounce for deeper light transport
-      vec3 bounce2Dir = reflect(internalReflDir, n);
-      float bounce2Refl = clamp(1.0 - sceneSDF(p + bounce2Dir * 0.1).x * 8.0, 0.0, 1.0);
+      float bounce2Refl = clamp(1.0 - samples.gemstone.y * 8.0, 0.0, 1.0);
       gemCol += u_primary_color * bounce2Refl * beer * 0.1;
       vec3 gemSpec = vec3(1.0, 0.96, 0.82) * spec1 * 2.2;
       // Dispersion: wavelength-dependent refraction
