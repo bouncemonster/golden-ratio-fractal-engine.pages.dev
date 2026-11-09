@@ -160,12 +160,12 @@ export interface ResolvedIndices {
  * Shared base for WebGL2 and WebGPU fractal engines.
  * Extracts common palette resolution, index computation, and uniform packing.
  */
-export abstract class FractalEngineBase {
-  protected canvas: HTMLCanvasElement;
+export abstract class FractalEngineBase<Canvas extends HTMLCanvasElement | OffscreenCanvas = HTMLCanvasElement> {
+  protected canvas: Canvas;
   public rendererInfo: string = 'Unknown';
   public qualityLevel: number = 2; // 0=low (mobile), 1=medium (laptop), 2=high (desktop)
 
-  constructor(canvas: HTMLCanvasElement) {
+  constructor(canvas: Canvas) {
     this.canvas = canvas;
   }
 

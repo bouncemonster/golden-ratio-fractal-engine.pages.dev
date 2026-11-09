@@ -78,7 +78,7 @@ export const FractalCanvas: React.FC<FractalCanvasProps> = ({
     onScreenshotCaptured,
   });
 
-  const { canvasRef, isDraggingRef, velocityRef, lastMousePosRef, lastInteractionReportTimeRef, lastMoveTimeRef, activeEngineType, isCompiling, shaderCompilePct, initFailed, loadProgress, stopRotation, toggleInertia, inertiaEnabledRef } = engine;
+  const { canvasRef, canvasKey, isDraggingRef, velocityRef, lastMousePosRef, lastInteractionReportTimeRef, lastMoveTimeRef, activeEngineType, isCompiling, shaderCompilePct, initFailed, loadProgress, stopRotation, toggleInertia, inertiaEnabledRef } = engine;
 
   // Surface REAL loading progress (device init + shader compile + first frame) so
   // the top-level loader can sync its animation to actual initialization time.
@@ -179,7 +179,7 @@ export const FractalCanvas: React.FC<FractalCanvasProps> = ({
       canvas.removeEventListener('touchstart', touchStartHandler, { capture: true });
       canvas.removeEventListener('touchmove', touchMoveHandler, { capture: true });
     };
-  }, [canvasRef, onParamsChange, onInteraction, scrollMode, onNextSpecimen, onPrevSpecimen, lastMoveTimeRef]);
+  }, [canvasRef, canvasKey, onParamsChange, onInteraction, scrollMode, onNextSpecimen, onPrevSpecimen, lastMoveTimeRef]);
 
   // Pointer Handlers for 3D Orbit with Inertia
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -315,9 +315,9 @@ export const FractalCanvas: React.FC<FractalCanvasProps> = ({
         </div>
       )}
 
-      {/* Keying canvas by activeEngineType guarantees a fresh HTML5 context on backend switch */}
+      {/* A transferred canvas cannot be reused when switching renderers. */}
       <canvas
-        key={activeEngineType}
+        key={canvasKey}
         ref={canvasRef}
         id="fractal-canvas"
         className="w-full h-full block touch-none"

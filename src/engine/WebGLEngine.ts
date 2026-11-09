@@ -7,7 +7,7 @@ import { ShaderManager } from './ShaderManager';
 import { logger } from '../utils/logger';
 import { PREFETCH_CONCURRENCY, WARMUP_FRAMES, SHADER_SWAP_TIMEOUT_MS, CANVAS_HARD_CAP, SHADER_POLL_MAX_SPINS, SHADER_POLL_INTERVAL_MS } from '../constants';
 
-export class WebGLEngine extends FractalEngineBase {
+export class WebGLEngine extends FractalEngineBase<HTMLCanvasElement | OffscreenCanvas> {
   private gl: WebGL2RenderingContext | null = null;
   private program: WebGLProgram | null = null;
   private vao: WebGLVertexArrayObject | null = null;
@@ -64,7 +64,10 @@ export class WebGLEngine extends FractalEngineBase {
    */
   public onCompileProgress?: (stage: string, percent: number) => void;
 
-  constructor(canvas: HTMLCanvasElement) {
+  constructor(
+    canvas: HTMLCanvasElement | OffscreenCanvas,
+    private readonly isTestMode = typeof window !== 'undefined' && window.location.search.includes('test=1'),
+  ) {
     super(canvas);
     this.rendererInfo = 'WebGL2 Shader Pipeline';
   }
@@ -74,22 +77,23 @@ export class WebGLEngine extends FractalEngineBase {
     logger.group('[WebGL2] === INITIALIZATION START ===');
     renderDiagnostics.log('info', 'gpu', 'WebGL2 initialization started');
     logger.info('[WebGL2] Canvas element:', this.canvas);
-    logger.info('[WebGL2] Canvas size (CSS):', this.canvas.clientWidth, 'x', this.canvas.clientHeight);
-    logger.info('[WebGL2] Canvas size (buffer):', this.canvas.width, 'x', this.canvas.height);
+    const canvas = this.canvas;
+    logger.info('[WebGL2] Canvas size (buffer):', canvas.width, 'x', canvas.height);
     logger.info('[WebGL2] User Agent:', navigator.userAgent);
-    logger.info('[WebGL2] Device Pixel Ratio:', window.devicePixelRatio);
 
-    // Ensure canvas has valid dimensions before context creation
-    const rect = this.canvas.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) {
-      logger.warn('[WebGL2] Canvas has zero dimensions, setting fallback size...');
-      this.canvas.width = Math.max(1, this.canvas.clientWidth || 800);
-      this.canvas.height = Math.max(1, this.canvas.clientHeight || 600);
+    // The DOM owner sets the initial backing size before transferring an offscreen canvas.
+    if ('getBoundingClientRect' in canvas) {
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) {
+        logger.warn('[WebGL2] Canvas has zero dimensions, setting fallback size...');
+        canvas.width = Math.max(1, canvas.clientWidth || 800);
+        canvas.height = Math.max(1, canvas.clientHeight || 600);
+      }
     }
 
-    // Try webgl2 with minimal options first (most compatible)
-    // When ?test=1 is in URL, use preserveDrawingBuffer for headless screenshot capture
-    const isTestMode = typeof window !== 'undefined' && window.location.search.includes('test=1');
+    // Try webgl2 with minimal options first (most compatible).
+    // Test mode preserves the drawing buffer for headless screenshots.
+    const isTestMode = this.isTestMode;
     const ctxOptions = isTestMode ? {
       alpha: false,
       antialias: false,
@@ -126,7 +130,7 @@ export class WebGLEngine extends FractalEngineBase {
     // Last resort: try webgl (WebGL1)
     if (!gl) {
       logger.warn('[WebGL2] All webgl2 attempts failed, trying webgl (WebGL1)...');
-      const gl1 = this.canvas.getContext('webgl') || this.canvas.getContext('experimental-webgl');
+      const gl1 = canvas.getContext('webgl') || ('clientWidth' in canvas ? canvas.getContext('experimental-webgl') : null);
       if (gl1) {
         logger.error('[WebGL2] WebGL1 obtained but WebGL2 is required. Check chrome://gpu');
         logger.error('[WebGL2] WebGL1 renderer:', (gl1 as WebGLRenderingContext).getParameter((gl1 as WebGLRenderingContext).RENDERER));

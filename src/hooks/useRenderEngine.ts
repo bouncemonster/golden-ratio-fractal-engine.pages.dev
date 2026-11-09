@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback, RefObject } from 'react';
 import { FractalParams, FractalType, TelemetryData, RenderStyle, CameraMode } from '../types/fractal';
 import { WebGPUEngine } from '../engine/WebGPUEngine';
 import { WebGLEngine } from '../engine/WebGLEngine';
+import { WorkerWebGLEngine } from '../engine/WorkerWebGLEngine';
 import { getFractalIndex } from '../engine/fractalMappers';
 import { logger } from '../utils/logger';
 import {
@@ -59,6 +60,7 @@ export interface UseRenderEngineResult {
   onePercentLow: number;
   resolution: [number, number];
   canvasRef: RefObject<HTMLCanvasElement | null>;
+  canvasKey: string;
   keysPressedRef: RefObject<Set<string>>;
   isDraggingRef: RefObject<boolean>;
   velocityRef: RefObject<{ x: number; y: number }>;
@@ -103,6 +105,13 @@ export function useRenderEngine(
     return 'webgl2';
   });
 
+  const [workerEnabled, setWorkerEnabled] = useState(() =>
+    typeof window !== 'undefined' && window !== window.top &&
+    typeof Worker !== 'undefined' && typeof HTMLCanvasElement.prototype.transferControlToOffscreen === 'function'
+  );
+  const useWorker = workerEnabled && activeEngineType === 'webgl2';
+  const canvasKey = useWorker ? (isMobileDevice ? 'webgl2-worker-mobile' : 'webgl2-worker') : activeEngineType;
+
   const [isCompiling, setIsCompiling] = useState<boolean>(true);
   const [shaderCompilePct, setShaderCompilePct] = useState<number>(0);
   const [isEngineReady, setIsEngineReady] = useState<boolean>(false);
@@ -119,7 +128,7 @@ export function useRenderEngine(
   const [resolutionState, setResolutionState] = useState<[number, number]>([0, 0]);
 
   const webgpuEngineRef = useRef<WebGPUEngine | null>(null);
-  const webglEngineRef = useRef<WebGLEngine | null>(null);
+  const webglEngineRef = useRef<WebGLEngine | WorkerWebGLEngine | null>(null);
   const activeBackendLabelRef = useRef<string>('Initializing...');
 
   // Callback refs for stable render loop
@@ -223,6 +232,11 @@ export function useRenderEngine(
       height = Math.floor(height * scale);
     }
 
+    const engine = webglEngineRef.current;
+    if (engine instanceof WorkerWebGLEngine && engine.canvas === canvas) {
+      engine.resize(width, height);
+      return;
+    }
     if (canvas.width !== width || canvas.height !== height) {
       const oldW = canvas.width, oldH = canvas.height;
       canvas.width = width;
@@ -257,6 +271,14 @@ export function useRenderEngine(
         setIsCompiling(false);
       }
     }, ENGINE_SETUP_TIMEOUT_MS);
+
+    function fallBackFromWorker(message: string) {
+      if (isDestroyed) return;
+      logger.warn('[useRenderEngine] ' + message + ' — restarting WebGL2 on a fresh canvas');
+      engineReadyRef.current = false;
+      setIsEngineReady(false);
+      setWorkerEnabled(false);
+    }
 
     async function setup() {
       if (!canvas) return;
@@ -315,9 +337,26 @@ export function useRenderEngine(
 
       // WebGL2
       logger.info('[useRenderEngine] Attempting WebGL2 init...');
-      const glEngine = new WebGLEngine(canvas);
-      const success = glEngine.init();
-      if (success && !isDestroyed) {
+      // Yield before transferring ownership so React's development effect replay
+      // can cancel the first setup without consuming the DOM canvas.
+      if (useWorker) {
+        await Promise.resolve();
+        if (isDestroyed) return;
+      }
+      const glEngine = useWorker
+        ? new WorkerWebGLEngine(canvas, fallBackFromWorker)
+        : new WebGLEngine(canvas);
+      if (glEngine instanceof WorkerWebGLEngine) webglEngineRef.current = glEngine;
+      const success = glEngine instanceof WorkerWebGLEngine ? await glEngine.init() : glEngine.init();
+      if (isDestroyed) {
+        glEngine.destroy();
+        return;
+      }
+      if (!success && useWorker) {
+        fallBackFromWorker('WebGL worker could not initialize');
+        return;
+      }
+      if (success) {
         webglEngineRef.current = glEngine;
         engineReadyRef.current = true;
         setIsEngineReady(true);
@@ -351,6 +390,11 @@ export function useRenderEngine(
     }
 
     setup().catch((err) => {
+      if (isDestroyed) return;
+      if (useWorker) {
+        fallBackFromWorker(err instanceof Error ? err.message : String(err));
+        return;
+      }
       logger.error('[useRenderEngine] Engine setup crashed:', err);
       setInitFailed(true);
       setIsCompiling(false);
@@ -384,8 +428,10 @@ export function useRenderEngine(
       }
     };
 
-    canvas.addEventListener('webglcontextlost', handleContextLost, false);
-    canvas.addEventListener('webglcontextrestored', handleContextRestored, false);
+    if (!useWorker) {
+      canvas.addEventListener('webglcontextlost', handleContextLost, false);
+      canvas.addEventListener('webglcontextrestored', handleContextRestored, false);
+    }
 
     const container = containerRef.current;
     let resizeObserver: ResizeObserver | null = null;
@@ -414,10 +460,11 @@ export function useRenderEngine(
       if (resizeObserver) resizeObserver.disconnect();
       webgpuEngineRef.current?.destroy();
       webglEngineRef.current?.destroy();
+      webglEngineRef.current = null;
       // Clear keyboard state to prevent stuck keys after unmount
       keysPressedRef.current.clear();
     };
-  }, [activeEngineType, handleResize]);
+  }, [activeEngineType, handleResize, useWorker]);
 
   // Main render loop
   useEffect(() => {
@@ -579,7 +626,11 @@ export function useRenderEngine(
 
         // Render — wrapped in try/catch to prevent render loop crash
         const curCanvas = canvasRef.current;
-        if (curCanvas && curCanvas.width > 0 && curCanvas.height > 0) {
+        const workerEngine = webglEngineRef.current instanceof WorkerWebGLEngine ? webglEngineRef.current : null;
+        const width = workerEngine?.width ?? curCanvas?.width ?? 0;
+        const height = workerEngine?.height ?? curCanvas?.height ?? 0;
+        let frameMs = workerEngine ? 0 : deltaMs;
+        if (curCanvas && width > 0 && height > 0) {
           try {
             // Detect shader swap start — overlay shows only for swaps that take real
             // time: prefetched programs swap synchronously inside render() (guard never
@@ -605,6 +656,7 @@ export function useRenderEngine(
             } else if (webglEngineRef.current) {
               drewFrame = webglEngineRef.current.render(simTime, effectiveParams);
             }
+            if (workerEngine && drewFrame) frameMs = workerEngine.frameIntervalMs;
             consecutiveRenderErrors = 0; // Reset on successful render
 
             // Hide loading overlay after first successful render OR after swap completes
@@ -647,8 +699,12 @@ export function useRenderEngine(
         // Screenshot
         if (screenshotRequestedRef.current && curCanvas) {
           try {
-            const dataUrl = curCanvas.toDataURL('image/png');
-            onScreenshotCapturedRef.current?.(dataUrl);
+            if (workerEngine) {
+              workerEngine.requestScreenshot(url => onScreenshotCapturedRef.current?.(url));
+            } else {
+              const dataUrl = curCanvas.toDataURL('image/png');
+              onScreenshotCapturedRef.current?.(dataUrl);
+            }
           } catch (e) {
             logger.error('Screenshot capture failed', e);
           }
@@ -656,14 +712,16 @@ export function useRenderEngine(
 
         // Telemetry
         const frameHistory = frameTimesRef.current;
-        frameHistory.push(deltaMs);
-        if (frameHistory.length > 40) frameHistory.shift();
+        if (frameMs > 0) {
+          frameHistory.push(frameMs);
+          if (frameHistory.length > 40) frameHistory.shift();
+        }
 
-        if (timestamp - lastTelemetryDispatchRef.current > 250) {
+        if (frameMs > 0 && timestamp - lastTelemetryDispatchRef.current > 250) {
           lastTelemetryDispatchRef.current = timestamp;
 
           const avgFrameMs = frameHistory.reduce((a, b) => a + b, 0) / frameHistory.length;
-          const currentFps = deltaMs > 0 ? Math.round(1000 / deltaMs) : 0;
+          const currentFps = Math.round(1000 / frameMs);
           const avgFps = avgFrameMs > 0 ? Math.round(1000 / avgFrameMs) : 0;
 
           const sortedTimes = [...frameHistory].sort((a, b) => b - a);
@@ -680,11 +738,11 @@ export function useRenderEngine(
           const telemetry: TelemetryData = {
             fps: currentFps,
             avgFps,
-            frameTimeMs: parseFloat(deltaMs.toFixed(2)),
+            frameTimeMs: parseFloat(frameMs.toFixed(2)),
             onePercentLow,
             backend: label as 'WebGPU (WGSL)' | 'WebGL2 (GLSL)',
             adapterName: adapter,
-            resolution: [curCanvas?.width || 0, curCanvas?.height || 0],
+            resolution: [width, height],
             drsScale: 1.0,
             targetFps: currentParams.targetFps,
             interiorDistance: 0.0,
@@ -693,16 +751,16 @@ export function useRenderEngine(
           onTelemetryUpdateRef.current?.(telemetry);
           setFpsState(currentFps);
           setAvgFpsState(avgFps);
-          setFrameTimeState(parseFloat(deltaMs.toFixed(2)));
+          setFrameTimeState(parseFloat(frameMs.toFixed(2)));
           setOnePercentLowState(onePercentLow);
-          setResolutionState([curCanvas?.width || 0, curCanvas?.height || 0]);
+          setResolutionState([width, height]);
 
           // Periodic health diagnostic every 30s
           if (!lastHealthLogRef.current) lastHealthLogRef.current = timestamp;
           if (timestamp - lastHealthLogRef.current > 30000) {
             lastHealthLogRef.current = timestamp;
             const p = paramsRef.current;
-            logger.info(`[DIAG] Health: fps=${currentFps} avg=${avgFps} 1%=${onePercentLow} | fractal=${p.type} hybrid=${p.hybridType} | style=${p.renderStyle} cam=${p.cameraMode} | palette=${p.paletteId} seed=${p.paletteSeed ?? 0} rot=${p.paletteRotation} | audio=${p.enableAudio} tuning=${p.audioTuning} | res=${curCanvas?.width}x${curCanvas?.height}`);
+            logger.info(`[DIAG] Health: fps=${currentFps} avg=${avgFps} 1%=${onePercentLow} | fractal=${p.type} hybrid=${p.hybridType} | style=${p.renderStyle} cam=${p.cameraMode} | palette=${p.paletteId} seed=${p.paletteSeed ?? 0} rot=${p.paletteRotation} | audio=${p.enableAudio} tuning=${p.audioTuning} | res=${width}x${height}`);
           }
 
           // DYNAMIC QUALITY: Auto-adjust based on FPS with hysteresis and cooldown
@@ -918,6 +976,7 @@ export function useRenderEngine(
     onePercentLow: onePercentLowState,
     resolution: resolutionState,
     canvasRef,
+    canvasKey,
     keysPressedRef,
     isDraggingRef,
     velocityRef,
