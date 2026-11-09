@@ -75,6 +75,12 @@ export const FRAGMENT_SHADER_SOURCE = `#version 300 es
 precision highp float;
 
 in vec2 v_uv;
+#ifdef SWYPE_PHYLLOTAXIS_VERTEX_DATA
+flat in highp vec4 v_sceneMotion;
+flat in highp vec4 v_scenePrecession;
+flat in highp vec4 v_phiRotation;
+flat in highp vec4 v_phiFold;
+#endif
 out vec4 fragColor;
 
 uniform vec2 u_resolution;
@@ -151,17 +157,26 @@ vec2 mapPhyllotaxis(vec3 p_in, float t, float phi, int iters) {
   float trap = 1e10;
   int count = clamp(iters, 4, 18);
 
-  for (int i = 0; i < 18; i++) {
-    if (i >= count) break;
-    p.xy = rot2D(GOLDEN_ANGLE + t * 0.04) * p.xy;
-    p = abs(p) - vec3(0.28 * phi, 0.18 * phi, 0.22);
+#ifdef SWYPE_PHYLLOTAXIS_VERTEX_DATA
+  mat2 planarRotation = mat2(v_phiRotation.x, -v_phiRotation.y, v_phiRotation.y, v_phiRotation.x);
+  mat2 crossRotation = mat2(v_phiRotation.z, -v_phiRotation.w, v_phiRotation.w, v_phiRotation.z);
+  vec3 fold = v_phiFold.xyz;
+  float factor = v_phiFold.w;
+#else
+  mat2 planarRotation = rot2D(GOLDEN_ANGLE + t * 0.04);
+  mat2 crossRotation = rot2D(GOLDEN_ANGLE * 0.618);
+  vec3 fold = vec3(0.28 * phi, 0.18 * phi, 0.22);
+  float factor = phi * 0.94;
+#endif
+  for (int i = 0; i < count; i++) {
+    p.xy = planarRotation * p.xy;
+    p = abs(p) - fold;
     float r2 = dot(p, p);
     trap = min(trap, sqrt(r2));
     
-    float factor = phi * 0.94;
     p = p * factor;
     scale = scale * factor;
-    p.xz = rot2D(GOLDEN_ANGLE * 0.618) * p.xz;
+    p.xz = crossRotation * p.xz;
   }
   return vec2((length(p) - 0.35) / max(scale, 0.0001), trap);
 }
@@ -3352,38 +3367,24 @@ vec2 sceneSDF(vec3 p_world) {
   return vec2(current_d, current_trap);
 }
 
-vec3 calcNormal(vec3 p, float eps) {
-  // Tetrahedral normal estimation with adaptive epsilon
-  // Use smaller eps for more detail at close range
-  float adaptiveEps = eps * 0.5; // Reduce for sharper normals
-  
-  vec3 e1 = vec3(adaptiveEps, -adaptiveEps, -adaptiveEps);
-  vec3 e2 = vec3(-adaptiveEps, -adaptiveEps, adaptiveEps);
-  vec3 e3 = vec3(-adaptiveEps, adaptiveEps, -adaptiveEps);
-  vec3 e4 = vec3(adaptiveEps, adaptiveEps, adaptiveEps);
-
-  vec3 n = e1 * sceneSDF(p + e1).x +
-           e2 * sceneSDF(p + e2).x +
-           e3 * sceneSDF(p + e3).x +
-           e4 * sceneSDF(p + e4).x;
-  float len = length(n);
-  return len > 0.00001 ? n / len : vec3(0.0, 1.0, 0.0);
-}
-
-// Micro-detail normal perturbation for surface detail
-vec3 calcMicroNormal(vec3 p, float scale) {
-  float microEps = 0.0005 * scale;
-  vec3 e1 = vec3(microEps, -microEps, -microEps);
-  vec3 e2 = vec3(-microEps, -microEps, microEps);
-  vec3 e3 = vec3(-microEps, microEps, -microEps);
-  vec3 e4 = vec3(microEps, microEps, microEps);
-
-  vec3 n = e1 * sceneSDF(p + e1).x +
-           e2 * sceneSDF(p + e2).x +
-           e3 * sceneSDF(p + e3).x +
-           e4 * sceneSDF(p + e4).x;
-  float len = length(n);
-  return len > 0.00001 ? n / len : vec3(0.0, 1.0, 0.0);
+vec3 calcNormal(vec3 p, float eps, float microScale, out vec3 microNormal) {
+  // Base and micro normals use the same four directions at two scales.
+  const vec3 directions[4] = vec3[4](
+    vec3(1.0, -1.0, -1.0), vec3(-1.0, -1.0, 1.0),
+    vec3(-1.0, 1.0, -1.0), vec3(1.0, 1.0, 1.0)
+  );
+  vec3 coarse = vec3(0.0);
+  vec3 fine = vec3(0.0);
+  for (int i = 0; i < 8; i++) {
+    vec3 e = directions[i % 4] * (i < 4 ? eps * 0.5 : 0.0005 * microScale);
+    vec3 sampleNormal = e * sceneSDF(p + e).x;
+    if (i < 4) coarse += sampleNormal;
+    else fine += sampleNormal;
+  }
+  float coarseLength = length(coarse);
+  float fineLength = length(fine);
+  microNormal = fineLength > 0.00001 ? fine / fineLength : vec3(0.0, 1.0, 0.0);
+  return coarseLength > 0.00001 ? coarse / coarseLength : vec3(0.0, 1.0, 0.0);
 }
 
 // SOFT SHADOWS: 16 steps for realistic penumbra (optimized from 32)
@@ -3414,11 +3415,16 @@ float calcAO(vec3 p, vec3 n, float t) {
   occ = clamp(occ, 0.0, 2.5);
   
   // IQ multi-distance AO: 4 distances (was 3) for better detail
-  float ao1 = clamp(1.0 - 5.0 * max(0.003 * aoScale - sceneSDF(p + n * 0.003 * aoScale).x, 0.0), 0.0, 1.0);
-  float ao2 = clamp(1.0 - 3.0 * max(0.02  * aoScale - sceneSDF(p + n * 0.02  * aoScale).x, 0.0), 0.0, 1.0);
-  float ao3 = clamp(1.0 - 2.0 * max(0.08  * aoScale - sceneSDF(p + n * 0.08  * aoScale).x, 0.0), 0.0, 1.0);
-  float ao4 = clamp(1.0 - 1.2 * max(0.18  * aoScale - sceneSDF(p + n * 0.18  * aoScale).x, 0.0), 0.0, 1.0);
-  float multiAO = ao1 * 0.20 + ao2 * 0.35 + ao3 * 0.30 + ao4 * 0.15;
+  // Same four distance/strength pairs, evaluated at one SDF call site.
+  const vec4 distances = vec4(0.003, 0.02, 0.08, 0.18);
+  const vec4 strengths = vec4(5.0, 3.0, 2.0, 1.2);
+  vec4 distanceAO;
+  for (int i = 0; i < 4; i++) {
+    float distance = distances[i];
+    float d = sceneSDF(p + n * distance * aoScale).x;
+    distanceAO[i] = clamp(1.0 - strengths[i] * max(distance * aoScale - d, 0.0), 0.0, 1.0);
+  }
+  float multiAO = distanceAO.x * 0.20 + distanceAO.y * 0.35 + distanceAO.z * 0.30 + distanceAO.w * 0.15;
   return clamp(multiAO * (1.0 - 0.85 * occ), 0.12, 1.0);
 }
 
@@ -3745,7 +3751,8 @@ void main() {
     vec3 p = ro + rd * t;
     // Scale-adaptive normal epsilon: larger at close range to avoid precision noise
     float normalEps = min(0.0015 * max(t, 0.05) + 0.0004, 0.003);
-    vec3 base_n = calcNormal(p, normalEps);
+    vec3 micro_n;
+    vec3 base_n = calcNormal(p, normalEps, clamp(cam_dist * 0.5, 0.5, 2.0), micro_n);
     float ao = calcAO(p, base_n, t);
     
     // TRAP-BASED CURVATURE: Derive surface complexity from orbit trap data
@@ -3761,8 +3768,6 @@ void main() {
     vec3 n = ndotv > 0.0 ? -base_n : base_n;
     
     // MICRO NORMAL: Add fine surface detail from fractal geometry
-    float microScale = clamp(cam_dist * 0.5, 0.5, 2.0);
-    vec3 micro_n = calcMicroNormal(p, microScale);
     n = normalize(mix(n, micro_n, 0.15)); // 15% micro detail blend
 
     vec3 light1 = normalize(vec3(cos(u_time * 0.3), 1.2, sin(u_time * 0.3)));
@@ -3844,21 +3849,24 @@ void main() {
 
     // ENHANCED PBR Lighting: Environment reflections + SSS + soft shadows
     // Environment ambient: sample SDF along normal for color-bleeding approximation
-    float envOcc = sceneSDF(p + n * 0.15).x;
+    vec3 reflectDir = reflect(rd, n);
+    vec3 bounceDir = normalize(-light1 + n * 0.5);
+    vec3 samplePos[3] = vec3[3](p + n * 0.15, p + reflectDir * 0.3, p + bounceDir * 0.2);
+    vec3 distances;
+    for (int i = 0; i < 3; i++) distances[i] = sceneSDF(samplePos[i]).x;
+    float envOcc = distances.x;
     float envFactor = clamp(envOcc * 6.0, 0.0, 1.0);
     vec3 ambientCol = mix(u_secondary_color * 0.30, u_primary_color * 0.18, envFactor);
     vec3 ambient = ambientCol * ao;
     
     // ENVIRONMENT REFLECTIONS: 1 sample for subtle reflections
-    vec3 reflectDir = reflect(rd, n);
-    float envReflDist = sceneSDF(p + reflectDir * 0.3).x;
+    float envReflDist = distances.y;
     float envRefl = clamp(1.0 - envReflDist * 4.0, 0.0, 1.0);
     vec3 reflCol = mix(u_secondary_color, u_accent_color, envRefl) * envRefl * 0.25;
     reflCol *= (0.3 + 0.7 * fresnel);
     
     // BOUNCE LIGHT: Simplified indirect illumination
-    vec3 bounceDir = normalize(-light1 + n * 0.5);
-    float bounceDist = sceneSDF(p + bounceDir * 0.2).x;
+    float bounceDist = distances.z;
     float bounceFactor = clamp(1.0 - bounceDist * 5.0, 0.0, 1.0);
     vec3 bounceCol = u_primary_color * bounceFactor * 0.15 * ao;
 

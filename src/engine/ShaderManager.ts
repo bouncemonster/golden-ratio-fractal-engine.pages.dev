@@ -1,17 +1,59 @@
 ﻿/**
  * Shader Manager v3 - True minimal shader compilation
- * 
+ *
  * Parses the monolithic FRAGMENT_SHADER_SOURCE string and generates
  * a minimal shader per fractal that ONLY includes the needed function.
- * 
+ *
  * Key: sceneSDF calls the fractal function DIRECTLY (not through evalSingleFractal),
  * so the GLSL linker does not need any other map functions.
- * 
+ *
  * Shader size per fractal: ~900 lines (vs 4171 monolithic)
  */
 
-import { FRAGMENT_SHADER_SOURCE } from '../shaders/webglShaders';
+import { FRAGMENT_SHADER_SOURCE, GLSL_VERTEX_SHADER } from '../shaders/webglShaders';
 import { logger } from '../utils/logger';
+
+// Uniform-only motion used by the generic fragment and the Phyllotaxis vertex path.
+// A vertex evaluates this once for the fullscreen triangle; flat varyings carry it unchanged.
+const SCENE_MOTION = `
+  int iters = int(clamp(u_iterations, 6.0, 64.0));
+  float t = u_time * u_morph_speed;
+  float morphGate = clamp(u_morph_speed, 0.0, 1.0);
+  float phiEvo = (sin(t * 0.5) * 0.05 + sin(t * 0.3 + 1.7) * 0.03) * morphGate;
+  float phi = u_phi_val + phiEvo;
+  iters = clamp(iters + int(2.0 * sin(t * 0.18 + 0.5)), 6, 64);
+  float breathPrimary = sin(u_time * 0.8) * 0.5 + 0.5;
+  float breathSecondary = sin(u_time * 0.8 * phi + 1.0) * 0.5 + 0.5;
+  float breathTertiary = sin(u_time * 0.8 * phi * phi + 2.0) * 0.5 + 0.5;
+  float breathAmount = (breathPrimary * 0.5 + breathSecondary * 0.3 + breathTertiary * 0.2) * 0.11 * morphGate;
+`;
+const SCENE_PRECESSION = `
+  float precessAngle = u_time * 0.06 * morphGate;
+  float precessY = u_time * 0.037 * morphGate;
+  float cp = cos(precessAngle), sp = sin(precessAngle);
+  float cq = cos(precessY), sq = sin(precessY);
+`;
+
+const PHYLLOTAXIS_DATA = '#define SWYPE_PHYLLOTAXIS_VERTEX_DATA 1';
+const PHYLLOTAXIS_VERTEX_SHADER = GLSL_VERTEX_SHADER.replace('void main() {', `
+uniform float u_time;
+uniform float u_phi_val;
+uniform float u_morph_speed;
+uniform float u_iterations;
+flat out highp vec4 v_sceneMotion;
+flat out highp vec4 v_scenePrecession;
+flat out highp vec4 v_phiRotation;
+flat out highp vec4 v_phiFold;
+
+void main() {
+${SCENE_MOTION}${SCENE_PRECESSION}  v_sceneMotion = vec4(t, phi, breathAmount, float(iters));
+  v_scenePrecession = vec4(cp, sp, cq, sq);
+  const float goldenAngle = 2.399963229728653;
+  float planarAngle = goldenAngle + t * 0.04;
+  float crossAngle = goldenAngle * 0.618;
+  v_phiRotation = vec4(cos(planarAngle), sin(planarAngle), cos(crossAngle), sin(crossAngle));
+  v_phiFold = vec4(0.28 * phi, 0.18 * phi, 0.22, phi * 0.94);
+`);
 
 export interface CompilationProgress {
   fractalIndex: number;
@@ -190,13 +232,21 @@ export class ShaderManager {
     return { code: lines.slice(funcStart, funcEnd + 1).join('\n'), name: funcName, returnType, takesIters };
   }
 
-  private generateMinimalSceneSDF(funcName: string, returnType: string, takesIters: boolean): string {
+  private generateMinimalSceneSDF(funcName: string, returnType: string, takesIters: boolean, preparedMotion: boolean): string {
     const callArgs = takesIters
       ? funcName + '(p_eval, t, phi, iters)'
       : funcName + '(p_eval, t, phi)';
     const returnExpr = returnType === 'float'
       ? 'vec2(' + callArgs + ', 0.0)'
       : callArgs;
+    const motion = preparedMotion
+      ? '  float t = v_sceneMotion.x;\n  float phi = v_sceneMotion.y;\n' +
+        '  float breathAmount = v_sceneMotion.z;\n  int iters = int(v_sceneMotion.w);\n'
+      : SCENE_MOTION;
+    const precession = preparedMotion
+      ? '  float cp = v_scenePrecession.x, sp = v_scenePrecession.y;\n' +
+        '  float cq = v_scenePrecession.z, sq = v_scenePrecession.w;\n'
+      : SCENE_PRECESSION;
     return 'vec2 sceneSDF(vec3 p_world) {\n' +
       '  vec3 p_eval = p_world;\n' +
       '  float inv_scale = 1.0;\n' +
@@ -207,26 +257,10 @@ export class ShaderManager {
       '  }\n' +
       '  float r_bound = length(p_eval);\n' +
       '  if (r_bound > 5.0) return vec2((r_bound - 2.8) / max(inv_scale, 0.0001), r_bound);\n' +
-      '  int iters = int(clamp(u_iterations, 6.0, 64.0));\n' +
-      '  float t = u_time * u_morph_speed;\n' +
-      // INTERNAL EVOLUTION (mirrors the monolithic sceneSDF): morph_speed is a single
-      // aliveness dial. Amplitudes saturate at clamp(morph,0,1) so raising it past 1 only
-      // speeds the mathematical development (via t); the rigid breath/precession are gated
-      // too, so a frozen figure keeps a fixed orientation and reads as pure structure.
-      '  float morphGate = clamp(u_morph_speed, 0.0, 1.0);\n' +
-      '  float phiEvo = (sin(t * 0.5) * 0.05 + sin(t * 0.3 + 1.7) * 0.03) * morphGate;\n' +
-      '  float phi = u_phi_val + phiEvo;\n' +
-      '  iters = clamp(iters + int(2.0 * sin(t * 0.18 + 0.5)), 6, 64);\n' +
-      '  float breathPrimary = sin(u_time * 0.8) * 0.5 + 0.5;\n' +
-      '  float breathSecondary = sin(u_time * 0.8 * phi + 1.0) * 0.5 + 0.5;\n' +
-      '  float breathTertiary = sin(u_time * 0.8 * phi * phi + 2.0) * 0.5 + 0.5;\n' +
-      '  float breathAmount = (breathPrimary * 0.5 + breathSecondary * 0.3 + breathTertiary * 0.2) * 0.11 * morphGate;\n' +
+      motion +
       '  float breathWeight = 1.0 - exp(-r_bound * 0.8);\n' +
       '  p_eval *= 1.0 + breathAmount * breathWeight;\n' +
-      '  float precessAngle = u_time * 0.06 * morphGate;\n' +
-      '  float precessY = u_time * 0.037 * morphGate;\n' +
-      '  float cp = cos(precessAngle), sp = sin(precessAngle);\n' +
-      '  float cq = cos(precessY), sq = sin(precessY);\n' +
+      precession +
       '  p_eval = vec3(p_eval.x * cp + p_eval.z * sp, p_eval.y * cq - p_eval.x * sq * 0.3, -p_eval.x * sp + p_eval.z * cp);\n' +
       '  vec2 resA = ' + returnExpr + ';\n' +
       '  float current_d = resA.x;\n' +
@@ -250,7 +284,7 @@ export class ShaderManager {
       '}';
   }
 
-  private buildMinimalFragmentShader(fractalIndex: number): string {
+  private buildMinimalFragmentShader(fractalIndex: number, preparedMotion = false): string {
     const sections = this.parseSections();
     const fractal = this.extractFractalFunction(fractalIndex);
     if (!fractal.code) {
@@ -277,8 +311,11 @@ export class ShaderManager {
     // These are not part of the header, so without this the spliced shader fails to compile.
     const helpers = this.resolveHelperSources(fractal.name, fractal.code);
     const helperBlock = helpers.length ? helpers.join('\n') + '\n' : '';
-    const minimalSceneSDF = this.generateMinimalSceneSDF(fractal.name, fractal.returnType, fractal.takesIters);
-    const assembled = sections.header + '\n' + helperBlock + fractal.code + '\n\n' + minimalSceneSDF + '\n' + sections.footer;
+    const minimalSceneSDF = this.generateMinimalSceneSDF(fractal.name, fractal.returnType, fractal.takesIters, preparedMotion);
+    const header = preparedMotion
+      ? sections.header.replace('#version 300 es', '#version 300 es\n' + PHYLLOTAXIS_DATA)
+      : sections.header;
+    const assembled = header + '\n' + helperBlock + fractal.code + '\n\n' + minimalSceneSDF + '\n' + sections.footer;
     if (helpers.length) {
       logger.info('[ShaderManager] Fractal ' + fractalIndex + ' (' + fractal.name + '): included ' + helpers.length + ' helper function(s)');
     }
@@ -364,28 +401,41 @@ export class ShaderManager {
     return work;
   }
 
+  private shaderSources(fractalIndex: number, vertex: string) {
+    const preparedMotion = fractalIndex === 0 && vertex === GLSL_VERTEX_SHADER;
+    const fragment = this.buildMinimalFragmentShader(fractalIndex, preparedMotion);
+    return { vertex: fragment.includes(PHYLLOTAXIS_DATA) ? PHYLLOTAXIS_VERTEX_SHADER : vertex, fragment };
+  }
+
   private async compileForFractal(fractalIndex: number, vertexShaderSource: string): Promise<WebGLProgram> {
     // Yield to browser BEFORE heavy parsing — prevents main thread freeze on launch
     await new Promise<void>(resolve => setTimeout(resolve, 0));
-    
+
     // Guard: GL context may have been lost during the yield
     if (!this.gl) {
       throw new Error('GL context lost during async yield');
     }
-    
+
     this.reportProgress(fractalIndex, 'parsing', 10);
-    const fragmentSource = this.buildMinimalFragmentShader(fractalIndex);
-    
+    const { vertex, fragment } = this.shaderSources(fractalIndex, vertexShaderSource);
+
     // Yield to browser BETWEEN parsing and compilation — lets UI events through
     await new Promise<void>(resolve => setTimeout(resolve, 0));
-    
+
     // Guard: GL context may have been lost during the yield (engine destroyed, context reset)
     if (!this.gl) {
       throw new Error('GL context lost during async yield');
     }
-    
+
     this.reportProgress(fractalIndex, 'compiling', 40);
-    const program = await this.compileShaderProgram(vertexShaderSource, fragmentSource, fractalIndex);
+    let program: WebGLProgram;
+    try {
+      program = await this.compileShaderProgram(vertex, fragment, fractalIndex);
+    } catch (error) {
+      if (vertex === vertexShaderSource || this.gl.isContextLost()) throw error;
+      logger.warn('[ShaderManager] Prepared vertex data unavailable; retrying the generic Phyllotaxis shader', error);
+      program = await this.compileShaderProgram(vertexShaderSource, this.buildMinimalFragmentShader(fractalIndex), fractalIndex);
+    }
     this.reportProgress(fractalIndex, 'linking', 96); // ≥ the link-creep ceiling (94) so the swap chip stays monotonic
     this.cacheShader(fractalIndex, program);
     this.reportProgress(fractalIndex, 'complete', 100);
