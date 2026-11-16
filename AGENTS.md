@@ -1,8 +1,10 @@
-# Agent entry — swype-imagine
+# Agent entry — Golden Ratio Fractal Engine
 
 ## Correct source and reading order
 
-This is `bouncemonster/swype-imagine`, the Golden Ratio Fractal Engine. Its current GitHub `main` is authoritative. The recorded local checkout `J:\project\swype-imagine\app` is a location hint, not evidence that its contents are current. Do not create a second engine beside it or substitute another simulation project.
+Resume with [CODEX_CONTINUATION.md](CODEX_CONTINUATION.md) for the dated accepted scope and next bounded renderer criterion.
+
+This is `bouncemonster/golden-ratio-fractal-engine.pages.dev`, the Golden Ratio Fractal Engine. Its current GitHub `main` is authoritative. The recorded local checkout `J:\project\golden-ratio-fractal-engine\app` is a location hint, not evidence that its contents are current. Do not create a second engine beside it or substitute another simulation project.
 
 Read [.github/README.md](.github/README.md) for the product, [ARCHITECTURE.md](ARCHITECTURE.md) for the implementation map, and [DESIGN.md](DESIGN.md) for the design contract. The old instruction pointing to `AGENT.md` was incorrect: that file was absent at the 2026-10-05 inspection. Do not recreate a competing architecture document to satisfy the obsolete pointer.
 
