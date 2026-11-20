@@ -55,6 +55,10 @@
 - [WHITEPAPER.md](../WHITEPAPER.md) - Project overview, competitor analysis
 - [ARCHITECTURE_DIAGRAMS.md](ARCHITECTURE_DIAGRAMS.md) - Visual diagrams (Mermaid)
 
+## Search discoverability
+
+- [2026-11-20 evidence](seo-evidence-2026-11-20.md) - Public host roles, current source and HTTP baseline, official guidance, research limits and the next rendering check.
+
 ## Guides & Tutorials
 
 - [TUTORIALS.md](TUTORIALS.md) - Step-by-step guides (add fractals, render modes, deploy)
