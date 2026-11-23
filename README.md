@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://golden-ratio-fractal-engine.pages.dev/"><img alt="Live demo" src="https://img.shields.io/badge/Live_demo-golden--ratio--fractal--engine.pages.dev-F59E0B?style=for-the-badge&logo=cloudflarepages&logoColor=white" /></a>
   <a href="https://swype-imagine.moonsugar.space/"><img alt="Explainer build" src="https://img.shields.io/badge/Explainer_build-swype--imagine.moonsugar.space-8B5CF6?style=for-the-badge" /></a>
-  <a href="https://github.com/bouncemonster/swype-imagine/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/badge/CI-GitHub_Actions-informational?style=for-the-badge&logo=githubactions&logoColor=white" /></a>
+  <a href="https://github.com/bouncemonster/golden-ratio-fractal-engine.pages.dev/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/badge/CI-GitHub_Actions-informational?style=for-the-badge&logo=githubactions&logoColor=white" /></a>
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge" /></a>
   <img alt="TypeScript strict" src="https://img.shields.io/badge/TypeScript-5.8_strict-blue?style=for-the-badge&logo=typescript&logoColor=white" />
   <img alt="Fractal types" src="https://img.shields.io/badge/fractal_types-431-orange?style=for-the-badge" />
@@ -206,7 +206,7 @@ src/
 
 ## 🤝 Community
 
-- Contributions welcome — read [`docs/CONTRIBUTING.md`](./docs/CONTRIBUTING.md) and use the [issue templates](./issues/new/choose) or the [PR template](./.github/pull_request_template.md).
+- Contributions welcome — read [`docs/CONTRIBUTING.md`](./docs/CONTRIBUTING.md) and use the [issue templates](https://github.com/bouncemonster/golden-ratio-fractal-engine.pages.dev/issues/new/choose) or the [PR template](./.github/pull_request_template.md).
 - By participating you agree to the [Contributor Covenant 2.1 Code of Conduct](./.github/CODE_OF_CONDUCT.md).
 - Dependency and Actions updates are automated by [Dependabot](./.github/dependabot.yml).
 
@@ -219,7 +219,7 @@ src/
 **Built with ❤️ for the fractal community**
 
 <sub>
-Repo: <a href="https://github.com/bouncemonster/swype-imagine">bouncemonster/swype-imagine</a> ·
-Local git root: <code>J:\project\swype-imagine\app</code> ·
+Repo: <a href="https://github.com/bouncemonster/golden-ratio-fractal-engine.pages.dev">bouncemonster/golden-ratio-fractal-engine.pages.dev</a> ·
+Local git root: <code>J:\project\golden-ratio-fractal-engine\app</code> ·
 Last updated: September 2026
 </sub>

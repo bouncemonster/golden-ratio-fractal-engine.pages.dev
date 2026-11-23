@@ -67,8 +67,8 @@ This is a conceptual navigation diagram. See [ARCHITECTURE.md](../ARCHITECTURE.m
 From the repository root, with Node.js and npm available:
 
 ```sh
-git clone https://github.com/bouncemonster/swype-imagine.git
-cd swype-imagine
+git clone https://github.com/bouncemonster/golden-ratio-fractal-engine.pages.dev.git
+cd golden-ratio-fractal-engine.pages.dev
 npm ci
 npm run dev -- --host 127.0.0.1
 ```
@@ -109,7 +109,7 @@ application; everything else is the built artifact.
 
 ## Verify and hand off
 
-Read [AGENTS.md](../AGENTS.md) before editing. It now points to the existing architecture document and distinguishes the actual test lanes. Use GitHub `bouncemonster/swype-imagine/main`, preserve other agents' local work and checkpoint the source revision, changed files, checks and one next action before switching IDEs.
+Read [AGENTS.md](../AGENTS.md) before editing. It now points to the existing architecture document and distinguishes the actual test lanes. Use GitHub `bouncemonster/golden-ratio-fractal-engine.pages.dev/main`, preserve other agents' local work and checkpoint the source revision, changed files, checks and one next action before switching IDEs.
 
 <details>
 <summary><strong>Declared verification commands</strong></summary>
